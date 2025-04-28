@@ -1,0 +1,51 @@
+# .gitignore
+
+# Entornos virtuales
+venv/
+ENV/
+env/
+
+# Archivos de entorno
+.env
+.env.local
+.env*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyd
+*.pyo
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs y bases de datos
+*.log
+*.sql
+*.sqlite
+
+# Pruebas y cobertura
+.coverage
+htmlcov/
+.pytest_cache/

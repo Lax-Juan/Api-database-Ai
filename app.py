@@ -1,66 +1,167 @@
-# app.py (actualizado)
-from flask import Flask, request, jsonify
+# app.py
+from fastapi import FastAPI, Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
+from typing import List, Dict, Any
+import psycopg2
+from psycopg2 import pool, sql, errors
 import os
 from dotenv import load_dotenv
-import psycopg2
-from psycopg2 import sql
+import logging
+from fastapi.middleware.cors import CORSMiddleware
 
+# Configuración inicial
 load_dotenv()
 
-app = Flask(__name__)
+# Logger configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(
-            os.getenv('DB_URI'),
-            sslmode=os.getenv('SSL_MODE', 'require')
+# FastAPI app setup
+app = FastAPI(
+    title="Lax Data API",
+    description="API para gestión de datos de Lax Tech",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url=None
+)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security setup
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+# Pydantic models
+class QueryRequest(BaseModel):
+    query: str
+
+class QueryResponse(BaseModel):
+    query: str
+    columns: List[str]
+    results: List[List[Any]]
+    row_count: int
+
+# Database configuration
+DATABASE_URI = os.getenv("DATABASE_URI")
+MIN_CONNECTIONS = 1
+MAX_CONNECTIONS = 10
+
+# Connection pool setup
+try:
+    connection_pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=MIN_CONNECTIONS,
+        maxconn=MAX_CONNECTIONS,
+        dsn=DATABASE_URI,
+        sslmode="require"
+    )
+    logger.info("Database connection pool created successfully")
+except psycopg2.OperationalError as e:
+    logger.error(f"Error creating connection pool: {str(e)}")
+    raise RuntimeError("Database connection failed") from e
+
+# Security dependencies
+async def get_api_key(api_key: str = Security(api_key_header)):
+    if api_key != os.getenv("API_SECRET_KEY"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API Key"
         )
-        conn.autocommit = False
-        return conn
-    except Exception as e:
-        app.logger.error(f"Error de conexión: {str(e)}")
-        raise
+    return api_key
 
-@app.route('/query', methods=['POST'])
-def handle_query():
-    if not request.is_json or 'query' not in request.json:
-        return jsonify({'error': 'Se requiere un query en formato JSON'}), 400
+@app.post("/query", response_model=QueryResponse)
+async def execute_query(
+    request: QueryRequest,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Execute a SELECT query against the PostgreSQL database
     
-    query = request.json['query']
-    
+    - **query**: Valid SQL SELECT query
+    """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Validación básica de seguridad (solo permite SELECT por ejemplo)
-        if not query.strip().lower().startswith('select'):
-            return jsonify({'error': 'Solo se permiten consultas SELECT'}), 400
+        # Query validation
+        clean_query = request.query.strip().lower()
+        if not clean_query.startswith('select'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only SELECT queries are allowed"
+            )
+
+        # Get connection from pool
+        conn = connection_pool.getconn()
+        with conn.cursor() as cursor:
+            # Execute query
+            cursor.execute(sql.SQL(request.query))
             
-        # Ejecutar el query (versión segura con parámetros)
-        cursor.execute(sql.SQL(query))
-        
-        # Obtener resultados (si es una consulta SELECT)
-        if cursor.description:
-            columns = [desc[0] for desc in cursor.description]
-            results = cursor.fetchall()
-            return jsonify({
-                'query': query,
-                'results': results,
-                'columns': columns
-            })
-            
-        conn.commit()
-        return jsonify({'query': query, 'message': 'Query ejecutado exitosamente'})
-        
+            # Get results
+            if cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                results = cursor.fetchall()
+                return {
+                    "query": request.query,
+                    "columns": columns,
+                    "results": results,
+                    "row_count": len(results)
+                }
+
+            return {
+                "query": request.query,
+                "columns": [],
+                "results": [],
+                "row_count": 0
+            }
+
+    except errors.UndefinedTable as e:
+        logger.error(f"Table error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Table does not exist: {str(e)}"
+        )
+    except errors.SyntaxError as e:
+        logger.error(f"Syntax error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"SQL syntax error: {str(e)}"
+        )
     except psycopg2.Error as e:
-        conn.rollback()
-        app.logger.error(f"Error de PostgreSQL: {str(e)}")
-        return jsonify({'error': f'Error de base de datos: {str(e)}'}), 500
+        logger.error(f"Database error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
     except Exception as e:
-        return jsonify({'error': f'Error inesperado: {str(e)}'}), 500
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
     finally:
         if 'conn' in locals():
-            conn.close()
+            connection_pool.putconn(conn)
 
-if __name__ == '__main__':
-    app.run(debug=os.getenv('FLASK_DEBUG', 'False') == 'True')
+@app.on_event("shutdown")
+def shutdown_event():
+    """Close connection pool on shutdown"""
+    if connection_pool:
+        connection_pool.closeall()
+    logger.info("Database connection pool closed")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ssl_keyfile=os.getenv("SSL_KEYFILE", None),
+        ssl_certfile=os.getenv("SSL_CERTFILE", None)
+    )

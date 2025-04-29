@@ -11,8 +11,7 @@ import logging
 from fastapi.middleware.cors import CORSMiddleware
 
 # Configuración inicial
-load_dotenv()
-
+load_dotenv(override=True)
 # Logger configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -47,9 +46,7 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     query: str
-    columns: List[str]
-    results: List[List[Any]]
-    row_count: int
+    results: List[Dict[str, Any]]
 
 # Database configuration
 DATABASE_URI = os.getenv("DATABASE_URI")
@@ -100,26 +97,24 @@ async def execute_query(
         # Get connection from pool
         conn = connection_pool.getconn()
         with conn.cursor() as cursor:
-            # Execute query
             cursor.execute(sql.SQL(request.query))
             
-            # Get results
             if cursor.description:
                 columns = [desc[0] for desc in cursor.description]
                 results = cursor.fetchall()
+                
+                # Transformar resultados a lista de diccionarios
+                formatted_results = [
+                    dict(zip(columns, row))
+                    for row in results
+                ]
+                
                 return {
                     "query": request.query,
-                    "columns": columns,
-                    "results": results,
-                    "row_count": len(results)
+                    "results": formatted_results
                 }
 
-            return {
-                "query": request.query,
-                "columns": [],
-                "results": [],
-                "row_count": 0
-            }
+            return {"query": request.query, "results": []}
 
     except errors.UndefinedTable as e:
         logger.error(f"Table error: {str(e)}")
